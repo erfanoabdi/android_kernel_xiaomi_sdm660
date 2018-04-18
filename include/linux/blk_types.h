@@ -37,6 +37,7 @@ struct bvec_iter {
 
 	unsigned int            bi_bvec_done;	/* number of bytes completed in
 						   current bvec */
+    u64            bi_dun;        /* DUN setting for bio */
 };
 
 #ifdef CONFIG_BLOCK_PERF_FRAMEWORK
@@ -98,6 +99,10 @@ struct bio {
 		struct bio_integrity_payload *bi_integrity; /* data integrity */
 #endif
 	};
+#ifdef CONFIG_PFK
+	/* Encryption key to use (NULL if none) */
+	const struct blk_encryption_key	*bi_crypt_key;
+#endif
 
 	unsigned short		bi_vcnt;	/* how many bio_vec's */
 

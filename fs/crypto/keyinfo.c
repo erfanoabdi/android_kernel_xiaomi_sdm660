@@ -15,6 +15,7 @@
 #include <crypto/sha.h>
 #include <crypto/skcipher.h>
 #include "fscrypt_private.h"
+#include "fscrypt_ice.h"
 
 static struct crypto_shash *essiv_hash_tfm;
 
@@ -175,8 +176,8 @@ static struct fscrypt_mode {
 	},
 };
 
-static struct fscrypt_mode *
-select_encryption_mode(const struct fscrypt_info *ci, const struct inode *inode)
+struct fscrypt_mode *
+select_encryption_mode(struct fscrypt_info *ci, const struct inode *inode)
 {
 	if (!fscrypt_valid_enc_modes(ci->ci_data_mode, ci->ci_filename_mode)) {
 		fscrypt_warn(inode->i_sb,
@@ -186,11 +187,15 @@ select_encryption_mode(const struct fscrypt_info *ci, const struct inode *inode)
 		return ERR_PTR(-EINVAL);
 	}
 
-	if (S_ISREG(inode->i_mode))
+    if (S_ISREG(inode->i_mode)) {
+        ci->ci_mode = CI_DATA_MODE;
 		return &available_modes[ci->ci_data_mode];
+    }
 
-	if (S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode))
+    if (S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode)) {
+        ci->ci_mode = CI_FNAME_MODE;
 		return &available_modes[ci->ci_filename_mode];
+    }
 
 	WARN_ONCE(1, "fscrypt: filesystem tried to load encryption info for inode %lu, which is not encryptable (file type %d)\n",
 		  inode->i_ino, (inode->i_mode & S_IFMT));
@@ -204,6 +209,7 @@ static void put_crypt_info(struct fscrypt_info *ci)
 
 	crypto_free_skcipher(ci->ci_ctfm);
 	crypto_free_cipher(ci->ci_essiv_tfm);
+	memset(ci, 0, sizeof(*ci)); /* sanitizes ->ci_raw_key */
 	kmem_cache_free(fscrypt_info_cachep, ci);
 }
 
@@ -280,7 +286,6 @@ int fscrypt_get_encryption_info(struct inode *inode)
 	struct fscrypt_context ctx;
 	struct crypto_skcipher *ctfm;
 	struct fscrypt_mode *mode;
-	u8 *raw_key = NULL;
 	int res;
 
 	if (inode->i_crypt_info)
@@ -334,11 +339,8 @@ int fscrypt_get_encryption_info(struct inode *inode)
 	 * crypto API as part of key derivation.
 	 */
 	res = -ENOMEM;
-	raw_key = kmalloc(mode->keysize, GFP_NOFS);
-	if (!raw_key)
-		goto out;
 
-	res = find_and_derive_key(inode, &ctx, raw_key, mode->keysize);
+	res = find_and_derive_key(inode, &ctx, crypt_info->ci_raw_key, mode->keysize);
 	if (res)
 		goto out;
 
@@ -365,13 +367,13 @@ int fscrypt_get_encryption_info(struct inode *inode)
 	}
 	crypt_info->ci_ctfm = ctfm;
 	crypto_skcipher_set_flags(ctfm, CRYPTO_TFM_REQ_WEAK_KEY);
-	res = crypto_skcipher_setkey(ctfm, raw_key, mode->keysize);
+	res = crypto_skcipher_setkey(ctfm, crypt_info->ci_raw_key, mode->keysize);
 	if (res)
 		goto out;
 
 	if (S_ISREG(inode->i_mode) &&
 	    crypt_info->ci_data_mode == FS_ENCRYPTION_MODE_AES_128_CBC) {
-		res = init_essiv_generator(crypt_info, raw_key, mode->keysize);
+		res = init_essiv_generator(crypt_info, crypt_info->ci_raw_key, mode->keysize);
 		if (res) {
 			fscrypt_warn(inode->i_sb,
 				     "error initializing ESSIV generator for inode %lu: %d",
@@ -385,7 +387,6 @@ out:
 	if (res == -ENOKEY)
 		res = 0;
 	put_crypt_info(crypt_info);
-	kzfree(raw_key);
 	return res;
 }
 EXPORT_SYMBOL(fscrypt_get_encryption_info);
